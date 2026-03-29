@@ -1,0 +1,27 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AssumeBootstrapRoles",
+      "Effect": "Allow",
+      "Action": ["sts:AssumeRole"],
+      "Resource": ["arn:aws:iam::*:role/cdk-*"]
+    },
+    {
+      "Sid": "DescribeStacks",
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:DescribeStacks",
+        "cloudformation:DescribeStackEvents",
+        "cloudformation:GetTemplate"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadBootstrapSsm",
+      "Effect": "Allow",
+      "Action": ["ssm:GetParameter"],
+      "Resource": "arn:aws:ssm:*:*:parameter/cdk-bootstrap/*"
+    }
+  ]
+}
