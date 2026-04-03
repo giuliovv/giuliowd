@@ -8,6 +8,7 @@ import { Construct } from 'constructs';
 export interface StaticSiteStackProps extends cdk.StackProps {
   siteName: string;
   contentPath: string;
+  env?: cdk.Environment;
 }
 
 export class StaticSiteStack extends cdk.Stack {
