@@ -33,12 +33,21 @@
       "Resource": "*"
     },
     {
-      "Sid": "ReadECS",
+      "Sid": "FullECS",
       "Effect": "Allow",
-      "Action": [
-        "ecs:Describe*",
-        "ecs:List*"
-      ],
+      "Action": ["ecs:*"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "FullS3",
+      "Effect": "Allow",
+      "Action": ["s3:*"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "FullCloudFront",
+      "Effect": "Allow",
+      "Action": ["cloudfront:*"],
       "Resource": "*"
     },
     {
