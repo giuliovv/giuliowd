@@ -9,6 +9,9 @@ export class ClaudeServerStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
+    // Pass via: cdk deploy --context telegramToken=xxx
+    const telegramToken = this.node.tryGetContext('telegramToken') ?? 'REPLACE_ME';
+
     const vpc = ec2.Vpc.fromLookup(this, 'DefaultVpc', { isDefault: true });
 
     const sg = new ec2.SecurityGroup(this, 'SG', {
@@ -18,60 +21,166 @@ export class ClaudeServerStack extends cdk.Stack {
     });
     sg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(22), 'SSH');
 
+    // Instance role — grants AWS permissions so no manual aws configure needed
     const role = new iam.Role(this, 'Role', {
       assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
     });
 
+    // CDK deployment permissions (same scope as openclaw-deployer)
+    role.addToPolicy(new iam.PolicyStatement({
+      actions: ['sts:AssumeRole'],
+      resources: ['arn:aws:iam::*:role/cdk-*'],
+    }));
+    role.addToPolicy(new iam.PolicyStatement({
+      actions: [
+        'cloudformation:Describe*', 'cloudformation:List*', 'cloudformation:Get*',
+        's3:*', 'cloudfront:*',
+        'ecs:*', 'ecr:*',
+        'lambda:*', 'apigateway:*', 'execute-api:*',
+        'dynamodb:*',
+        'route53:*', 'route53domains:*',
+        'acm:*',
+        'logs:*', 'cloudwatch:*',
+        'secretsmanager:*',
+        'ec2:Describe*', 'ec2:List*',
+      ],
+      resources: ['*'],
+    }));
+    role.addToPolicy(new iam.PolicyStatement({
+      actions: [
+        'iam:CreateRole', 'iam:DeleteRole', 'iam:AttachRolePolicy', 'iam:DetachRolePolicy',
+        'iam:PutRolePolicy', 'iam:DeleteRolePolicy', 'iam:GetRole', 'iam:PassRole',
+        'iam:CreateServiceLinkedRole',
+      ],
+      resources: ['*'],
+    }));
+
     const userData = ec2.UserData.forLinux();
     userData.addCommands(
-      // 2GB swap — essential for 0.5GB RAM instance
+      'set -euo pipefail',
+      'exec > /var/log/user-data.log 2>&1',
+
+      // ── Swap (essential on 1GB RAM) ──────────────────────────────────────
       'fallocate -l 2G /swapfile',
       'chmod 600 /swapfile',
       'mkswap /swapfile',
       'swapon /swapfile',
       "echo '/swapfile none swap sw 0 0' >> /etc/fstab",
 
-      // System packages
+      // ── System packages ──────────────────────────────────────────────────
       'apt-get update -y',
-      'apt-get install -y curl git tmux unzip',
+      'apt-get install -y curl git tmux unzip expect',
 
-      // SSH key
+      // Cap systemd journal to prevent disk fill
+      'mkdir -p /etc/systemd/journald.conf.d',
+      'echo -e "[Journal]\\nSystemMaxUse=50M" > /etc/systemd/journald.conf.d/size.conf',
+      'systemctl restart systemd-journald',
+
+      // ── SSH key ───────────────────────────────────────────────────────────
       'mkdir -p /home/ubuntu/.ssh',
       `echo '${SSH_PUBLIC_KEY}' >> /home/ubuntu/.ssh/authorized_keys`,
       'chown -R ubuntu:ubuntu /home/ubuntu/.ssh',
       'chmod 700 /home/ubuntu/.ssh',
       'chmod 600 /home/ubuntu/.ssh/authorized_keys',
 
-      // Claude Code
-      'curl -fsSL https://claude.ai/install.sh | sudo -u ubuntu bash',
+      // ── Claude Code ───────────────────────────────────────────────────────
+      'sudo -u ubuntu bash -c "curl -fsSL https://claude.ai/install.sh | bash"',
 
-      // Bun (required for Claude Code channel plugins)
+      // ── Bun (required for Telegram plugin) ───────────────────────────────
       'sudo -u ubuntu bash -c "curl -fsSL https://bun.sh/install | bash"',
+      'ln -sf /home/ubuntu/.bun/bin/bun /usr/local/bin/bun',
 
-      // tmux autostart script for claude channels
-      'cat > /home/ubuntu/start-claude-channels.sh << \'EOF\'',
+      // ── AWS CDK + tools ───────────────────────────────────────────────────
+      'sudo -u ubuntu bash -c "npm install -g aws-cdk typescript ts-node"',
+
+      // ── Workspace ─────────────────────────────────────────────────────────
+      'sudo -u ubuntu bash -c "mkdir -p /home/ubuntu/giuliowd"',
+
+      // ── start-claude-channels.sh ──────────────────────────────────────────
+      `cat > /home/ubuntu/start-claude-channels.sh << 'SCRIPT'`,
       '#!/bin/bash',
-      'tmux new-session -d -s claude "claude --channels plugin:telegram@claude-plugins-official --dangerously-skip-permissions >> ~/.claude-channels.log 2>&1"',
-      'EOF',
+      'tmux kill-session -t claude-channels 2>/dev/null || true',
+      'sleep 1',
+      `tmux new-session -d -s claude-channels \\`,
+      `  -e TELEGRAM_BOT_TOKEN=${telegramToken} \\`,
+      '  -e PATH=/home/ubuntu/.bun/bin:/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin \\',
+      '  -e HOME=/home/ubuntu \\',
+      '  "/home/ubuntu/.local/bin/claude --channels plugin:telegram@claude-plugins-official --dangerously-skip-permissions"',
+      '# Accept workspace trust dialog',
+      'sleep 5',
+      "tmux send-keys -t claude-channels '' Enter",
+      '# Keep running while tmux session is alive (systemd tracks this process)',
+      'while tmux has-session -t claude-channels 2>/dev/null; do',
+      '  sleep 10',
+      'done',
+      'SCRIPT',
       'chmod +x /home/ubuntu/start-claude-channels.sh',
       'chown ubuntu:ubuntu /home/ubuntu/start-claude-channels.sh',
 
-      // systemd service
-      'cat > /etc/systemd/system/claude-channels.service << \'EOF\'',
+      // ── watchdog: restart if bun plugin dies ─────────────────────────────
+      `cat > /home/ubuntu/watchdog-claude.sh << 'SCRIPT'`,
+      '#!/bin/bash',
+      'if systemctl is-active --quiet claude-channels; then',
+      '  if ! pgrep -u ubuntu -f "bun.*server.ts" > /dev/null; then',
+      '    echo "$(date): bun not running, restarting" >> /home/ubuntu/watchdog.log',
+      '    systemctl restart claude-channels',
+      '  fi',
+      'fi',
+      'SCRIPT',
+      'chmod +x /home/ubuntu/watchdog-claude.sh',
+      'chown ubuntu:ubuntu /home/ubuntu/watchdog-claude.sh',
+
+      // ── compact: prevent context overflow ────────────────────────────────
+      `cat > /home/ubuntu/compact-claude.sh << 'SCRIPT'`,
+      '#!/bin/bash',
+      'if tmux has-session -t claude-channels 2>/dev/null; then',
+      "  tmux send-keys -t claude-channels '/compact' Enter",
+      '  echo "$(date): sent /compact" >> /home/ubuntu/compact.log',
+      'fi',
+      'SCRIPT',
+      'chmod +x /home/ubuntu/compact-claude.sh',
+      'chown ubuntu:ubuntu /home/ubuntu/compact-claude.sh',
+
+      // ── cleanup: remove old Claude auto-update binaries ───────────────────
+      `cat > /home/ubuntu/cleanup-claude-versions.sh << 'SCRIPT'`,
+      '#!/bin/bash',
+      'VERSIONS_DIR="/home/ubuntu/.local/share/claude/versions"',
+      '[ -d "$VERSIONS_DIR" ] && ls -t "$VERSIONS_DIR" | tail -n +3 | xargs -I{} rm -f "$VERSIONS_DIR/{}"',
+      'rm -rf /home/ubuntu/.cache/pip /home/ubuntu/.npm 2>/dev/null || true',
+      'SCRIPT',
+      'chmod +x /home/ubuntu/cleanup-claude-versions.sh',
+      'chown ubuntu:ubuntu /home/ubuntu/cleanup-claude-versions.sh',
+
+      // ── sudoers: allow watchdog to restart service ────────────────────────
+      "echo 'ubuntu ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart claude-channels' > /etc/sudoers.d/claude-watchdog",
+
+      // ── crontab ───────────────────────────────────────────────────────────
+      '(crontab -u ubuntu -l 2>/dev/null; echo "*/5 * * * * /home/ubuntu/watchdog-claude.sh") | crontab -u ubuntu -',
+      '(crontab -u ubuntu -l 2>/dev/null; echo "0 */3 * * * /home/ubuntu/compact-claude.sh") | crontab -u ubuntu -',
+      '(crontab -u ubuntu -l 2>/dev/null; echo "0 3 * * * /home/ubuntu/cleanup-claude-versions.sh") | crontab -u ubuntu -',
+
+      // ── systemd service ───────────────────────────────────────────────────
+      `cat > /etc/systemd/system/claude-channels.service << 'SERVICE'`,
       '[Unit]',
       'Description=Claude Code Telegram Channels',
       'After=network.target',
       '[Service]',
-      'Type=forking',
+      'Type=simple',
       'User=ubuntu',
-      'ExecStart=/home/ubuntu/start-claude-channels.sh',
-      'Restart=on-failure',
+      'WorkingDirectory=/home/ubuntu/giuliowd',
+      'Environment=HOME=/home/ubuntu',
+      'Restart=always',
       'RestartSec=30',
+      'ExecStart=/home/ubuntu/start-claude-channels.sh',
       '[Install]',
       'WantedBy=multi-user.target',
-      'EOF',
+      'SERVICE',
       'systemctl daemon-reload',
+      // Enable but don't start — needs `claude login` first
       'systemctl enable claude-channels',
+
+      // ── Done ──────────────────────────────────────────────────────────────
+      'echo "Bootstrap complete. SSH in and run: claude login, then: sudo systemctl start claude-channels"',
     );
 
     const instance = new ec2.Instance(this, 'Instance', {
@@ -85,7 +194,8 @@ export class ClaudeServerStack extends cdk.Stack {
       userData,
       blockDevices: [{
         deviceName: '/dev/sda1',
-        volume: ec2.BlockDeviceVolume.ebs(8, { volumeType: ec2.EbsDeviceVolumeType.GP3 }),
+        // 20GB — Claude auto-updates daily (~226MB each), 8GB fills up fast
+        volume: ec2.BlockDeviceVolume.ebs(20, { volumeType: ec2.EbsDeviceVolumeType.GP3 }),
       }],
     });
 
@@ -95,5 +205,8 @@ export class ClaudeServerStack extends cdk.Stack {
 
     new cdk.CfnOutput(this, 'PublicIP', { value: eip.ref });
     new cdk.CfnOutput(this, 'SSH', { value: `ssh ubuntu@${eip.ref}` });
+    new cdk.CfnOutput(this, 'NextStep', {
+      value: 'SSH in → run "claude login" → sudo systemctl start claude-channels',
+    });
   }
 }
