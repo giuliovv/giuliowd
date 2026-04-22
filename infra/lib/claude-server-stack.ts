@@ -78,6 +78,9 @@ export class ClaudeServerStack extends cdk.Stack {
       // ── System packages ──────────────────────────────────────────────────
       'apt-get update -y',
       'apt-get install -y curl git tmux unzip expect',
+      // Node.js 20 LTS (required for npm/CDK)
+      'curl -fsSL https://deb.nodesource.com/setup_20.x | bash -',
+      'apt-get install -y nodejs',
 
       // Cap systemd journal to prevent disk fill
       'mkdir -p /etc/systemd/journald.conf.d',
