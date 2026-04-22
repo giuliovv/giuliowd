@@ -96,6 +96,8 @@ export class ClaudeServerStack extends cdk.Stack {
 
       // ── Claude Code ───────────────────────────────────────────────────────
       'sudo -u ubuntu bash -c "curl -fsSL https://claude.ai/install.sh | bash"',
+      // Install Telegram plugin (requires login to complete auth, but install works pre-login)
+      'sudo -u ubuntu bash -c "PATH=/home/ubuntu/.local/bin:$PATH HOME=/home/ubuntu /home/ubuntu/.local/bin/claude plugin install telegram" || true',
 
       // ── Bun (required for Telegram plugin) ───────────────────────────────
       'sudo -u ubuntu bash -c "curl -fsSL https://bun.sh/install | bash"',
@@ -117,9 +119,9 @@ export class ClaudeServerStack extends cdk.Stack {
       '  -e PATH=/home/ubuntu/.bun/bin:/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin \\',
       '  -e HOME=/home/ubuntu \\',
       '  "/home/ubuntu/.local/bin/claude --channels plugin:telegram@claude-plugins-official --dangerously-skip-permissions"',
-      '# Accept workspace trust dialog',
+      '# Accept bypass permissions dialog (option 2: Yes, I accept)',
       'sleep 5',
-      "tmux send-keys -t claude-channels '' Enter",
+      "tmux send-keys -t claude-channels '2' Enter",
       '# Keep running while tmux session is alive (systemd tracks this process)',
       'while tmux has-session -t claude-channels 2>/dev/null; do',
       '  sleep 10',
