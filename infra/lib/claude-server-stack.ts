@@ -194,8 +194,8 @@ export class ClaudeServerStack extends cdk.Stack {
       userData,
       blockDevices: [{
         deviceName: '/dev/sda1',
-        // 20GB — Claude auto-updates daily (~226MB each), 8GB fills up fast
-        volume: ec2.BlockDeviceVolume.ebs(20, { volumeType: ec2.EbsDeviceVolumeType.GP3 }),
+        // 10GB — Claude auto-updates daily (~226MB each), cleanup cron keeps it under control
+        volume: ec2.BlockDeviceVolume.ebs(10, { volumeType: ec2.EbsDeviceVolumeType.GP3 }),
       }],
     });
 
