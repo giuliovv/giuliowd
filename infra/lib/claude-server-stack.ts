@@ -103,6 +103,10 @@ export class ClaudeServerStack extends cdk.Stack {
       'sudo -u ubuntu bash -c "curl -fsSL https://bun.sh/install | bash"',
       'ln -sf /home/ubuntu/.bun/bin/bun /usr/local/bin/bun',
 
+      // ── AWS CLI v2 (ARM64) ───────────────────────────────────────────────
+      'curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip -o /tmp/awscliv2.zip',
+      'unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install && rm -rf /tmp/aws /tmp/awscliv2.zip',
+
       // ── AWS CDK + tools ───────────────────────────────────────────────────
       'sudo -u ubuntu bash -c "npm install -g aws-cdk typescript ts-node"',
 
