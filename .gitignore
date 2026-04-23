@@ -4,3 +4,4 @@ cdk.out/
 .env
 *.log
 oci/
+.claude/memory/
